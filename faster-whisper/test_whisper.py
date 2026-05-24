@@ -1,0 +1,16 @@
+from faster_whisper import WhisperModel
+
+# tiny 모델로 테스트 (가장 작고 빠름, 약 75MB)
+print("모델 로딩 중... (처음에는 다운로드가 필요합니다)")
+model = WhisperModel("tiny", device="cpu", compute_type="int8")
+print("모델 로딩 완료!")
+print()
+print("=== faster-whisper 정보 ===")
+print(f"모델 크기: tiny")
+print(f"디바이스: CPU (온디바이스)")
+print(f"실행 방식: 완전 로컬 - 인터넷 불필요")
+print()
+print("음성 파일을 인식하려면:")
+print('  segments, info = model.transcribe("your_audio.mp3")')
+print('  for segment in segments:')
+print('      print(segment.text)')
