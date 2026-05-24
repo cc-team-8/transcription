@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>Speech API 테스트</title>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: 60px auto; padding: 0 20px; background: #f5f5f5; }
+    h2 { color: #333; }
+    #status { font-size: 14px; color: #888; margin-bottom: 12px; }
+    #interim { color: #aaa; font-style: italic; min-height: 24px; }
+    #output { background: white; border: 1px solid #ddd; border-radius: 8px; padding: 16px; min-height: 200px; white-space: pre-wrap; line-height: 1.8; }
+    button { padding: 10px 24px; font-size: 15px; border: none; border-radius: 6px; cursor: pointer; margin-right: 8px; }
+    #btn-start { background: #4CAF50; color: white; }
+    #btn-stop  { background: #f44336; color: white; }
+    #btn-clear { background: #ddd; color: #333; }
+    button:disabled { opacity: 0.4; cursor: default; }
+    .time { font-size: 12px; color: #999; margin-right: 6px; }
+  </style>
+</head>
+<body>
+  <h2>Web Speech API 테스트</h2>
+  <div id="status">대기 중</div>
+  <div id="interim"></div>
+  <br>
+  <button id="btn-start">🎤 시작</button>
+  <button id="btn-stop" disabled>⏹ 중지</button>
+  <button id="btn-clear">🗑 지우기</button>
+  <br><br>
+  <div id="output"></div>
+
+  <script>
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      document.getElementById('status').textContent = '❌ 이 브라우저는 Web Speech API를 지원하지 않습니다. Chrome을 사용하세요.';
+    }
+
+    const rec = new SpeechRecognition();
+    rec.lang = 'ko-KR';
+    rec.continuous = true;
+    rec.interimResults = true;
+
+    const status  = document.getElementById('status');
+    const interim = document.getElementById('interim');
+    const output  = document.getElementById('output');
+    const btnStart = document.getElementById('btn-start');
+    const btnStop  = document.getElementById('btn-stop');
+
+    function now() {
+      return new Date().toTimeString().slice(0, 8);
+    }
+
+    rec.onstart = () => {
+      status.textContent = '🔴 듣는 중...';
+      btnStart.disabled = true;
+      btnStop.disabled = false;
+    };
+
+    rec.onend = () => {
+      status.textContent = '대기 중';
+      btnStart.disabled = false;
+      btnStop.disabled = true;
+      interim.textContent = '';
+    };
+
+    rec.onresult = (e) => {
+      let interimText = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) {
+          output.textContent += `[${now()}] ${t}\n`;
+          output.scrollTop = output.scrollHeight;
+        } else {
+          interimText += t;
+        }
+      }
+      interim.textContent = interimText ? `⏳ ${interimText}` : '';
+    };
+
+    rec.onerror = (e) => {
+      status.textContent = `오류: ${e.error}`;
+    };
+
+    btnStart.onclick = () => rec.start();
+    btnStop.onclick  = () => rec.stop();
+    document.getElementById('btn-clear').onclick = () => { output.textContent = ''; };
+  </script>
+</body>
+</html>

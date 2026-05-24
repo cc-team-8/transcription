@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>실시간 전사</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; display: flex; flex-direction: column; align-items: center; padding: 40px 20px; min-height: 100vh; }
+    h2 { color: #222; margin-bottom: 24px; }
+    .card { background: white; border-radius: 12px; padding: 24px; width: 100%; max-width: 680px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); margin-bottom: 16px; }
+    #status { font-size: 15px; color: #555; margin-bottom: 12px; }
+    #level-wrap { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; }
+    #level-bar { height: 8px; flex: 1; background: #eee; border-radius: 4px; overflow: hidden; }
+    #level-fill { height: 100%; width: 0%; background: #4CAF50; border-radius: 4px; transition: width 0.05s; }
+    .btn-row { display: flex; gap: 10px; }
+    button { padding: 10px 22px; font-size: 14px; border: none; border-radius: 8px; cursor: pointer; font-weight: 600; }
+    #btn-start { background: #4CAF50; color: white; }
+    #btn-stop  { background: #f44336; color: white; }
+    #btn-clear { background: #eee; color: #444; }
+    button:disabled { opacity: 0.35; cursor: default; }
+    #output { min-height: 220px; max-height: 420px; overflow-y: auto; font-size: 15px; line-height: 2; white-space: pre-wrap; color: #222; }
+    .time { color: #aaa; font-size: 12px; margin-right: 6px; }
+    .text { color: #222; }
+    #ws-status { font-size: 12px; color: #aaa; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h2>실시간 전사</h2>
+
+  <div class="card">
+    <div id="status">대기 중</div>
+    <div id="level-wrap">
+      <span id="level-icon">○</span>
+      <div id="level-bar"><div id="level-fill"></div></div>
+    </div>
+    <div class="btn-row">
+      <button id="btn-start">🎤 시작</button>
+      <button id="btn-stop" disabled>⏹ 중지</button>
+      <button id="btn-clear">🗑 지우기</button>
+    </div>
+    <div id="ws-status">서버 연결 중...</div>
+  </div>
+
+  <div class="card">
+    <div id="output"></div>
+  </div>
+
+  <script>
+    const SILENCE_THRESHOLD = 0.012;
+    const SILENCE_SEC = 0.8;
+    const MIN_SPEECH_SEC = 0.4;
+    const PROCESSOR_SIZE = 4096;
+
+    const statusEl   = document.getElementById('status');
+    const levelFill  = document.getElementById('level-fill');
+    const levelIcon  = document.getElementById('level-icon');
+    const output     = document.getElementById('output');
+    const wsStatusEl = document.getElementById('ws-status');
+    const btnStart   = document.getElementById('btn-start');
+    const btnStop    = document.getElementById('btn-stop');
+
+    // WebSocket
+    const ws = new WebSocket(`ws://${location.host}/ws`);
+    ws.onopen    = () => wsStatusEl.textContent = '✅ 서버 연결됨';
+    ws.onclose   = () => wsStatusEl.textContent = '❌ 서버 연결 끊김';
+    ws.onerror   = () => wsStatusEl.textContent = '❌ 서버 오류';
+    ws.onmessage = (e) => {
+      const { id, text } = JSON.parse(e.data);
+      fillRow(id, text);
+      setStatus('대기 중');
+    };
+
+    let audioCtx, source, processor, stream;
+    let speechBuf = [], silenceCount = 0, isSpeaking = false;
+    let pendingId = null;
+
+    function now() { return new Date().toTimeString().slice(0, 8); }
+
+    function setStatus(msg) { statusEl.textContent = msg; }
+
+    function createRow(id, time) {
+      const row = document.createElement('div');
+      row.id = 'row-' + id;
+      row.innerHTML = `<span class="time">[${time}]</span><span class="text">⏳</span>`;
+      output.appendChild(row);
+      output.scrollTop = output.scrollHeight;
+      return row;
+    }
+
+    function fillRow(id, text) {
+      const row = document.getElementById('row-' + id);
+      if (!row) return;
+      if (!text) { row.remove(); return; }
+      row.querySelector('.text').textContent = text;
+      output.scrollTop = output.scrollHeight;
+    }
+
+    function updateLevel(rms) {
+      const pct = Math.min(rms / 0.08 * 100, 100);
+      levelFill.style.width = pct + '%';
+      levelFill.style.background = rms > SILENCE_THRESHOLD ? '#4CAF50' : '#ccc';
+      levelIcon.textContent = rms > SILENCE_THRESHOLD ? '●' : '○';
+    }
+
+    async function resampleTo16k(float32, srcRate) {
+      if (srcRate === 16000) return float32;
+      const outLen = Math.ceil(float32.length * 16000 / srcRate);
+      const offCtx = new OfflineAudioContext(1, outLen, 16000);
+      const buf = offCtx.createBuffer(1, float32.length, srcRate);
+      buf.getChannelData(0).set(float32);
+      const src = offCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(offCtx.destination);
+      src.start(0);
+      const rendered = await offCtx.startRendering();
+      return rendered.getChannelData(0);
+    }
+
+    async function startRecording() {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,    // 스피커 소리 차단 핵심
+          noiseSuppression: true,
+          autoGainControl: true,
+        }
+      });
+
+      audioCtx = new AudioContext();
+      const sampleRate = audioCtx.sampleRate;
+      const SILENCE_FRAMES = Math.ceil(SILENCE_SEC * sampleRate / PROCESSOR_SIZE);
+      const MIN_FRAMES     = Math.ceil(MIN_SPEECH_SEC * sampleRate / PROCESSOR_SIZE);
+
+      source    = audioCtx.createMediaStreamSource(stream);
+      processor = audioCtx.createScriptProcessor(PROCESSOR_SIZE, 1, 1);
+
+      processor.onaudioprocess = async (e) => {
+        const input = new Float32Array(e.inputBuffer.getChannelData(0));
+        const rms = Math.sqrt(input.reduce((s, x) => s + x * x, 0) / input.length);
+        updateLevel(rms);
+
+        if (rms > SILENCE_THRESHOLD) {
+          if (!isSpeaking) {
+            isSpeaking = true;
+            pendingId = crypto.randomUUID();
+            createRow(pendingId, now());
+            setStatus('🎤 듣는 중...');
+          }
+          silenceCount = 0;
+          speechBuf.push(input);
+
+        } else if (isSpeaking) {
+          speechBuf.push(input);
+          silenceCount++;
+
+          if (silenceCount >= SILENCE_FRAMES) {
+            isSpeaking = false;
+            const id = pendingId;
+
+            if (speechBuf.length >= MIN_FRAMES && ws.readyState === WebSocket.OPEN) {
+              const total = speechBuf.reduce((s, b) => s + b.length, 0);
+              const merged = new Float32Array(total);
+              let offset = 0;
+              for (const b of speechBuf) { merged.set(b, offset); offset += b.length; }
+
+              setStatus('⏳ 처리 중...');
+              const pcm16k = await resampleTo16k(merged, sampleRate);
+              ws.send(JSON.stringify({ id }));
+              ws.send(pcm16k.buffer);
+            } else {
+              fillRow(id, '');
+              setStatus('대기 중');
+            }
+
+            speechBuf = [];
+            silenceCount = 0;
+            pendingId = null;
+          }
+        }
+      };
+
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+
+      btnStart.disabled = true;
+      btnStop.disabled  = false;
+      setStatus('🎤 준비 완료 — 말하세요');
+    }
+
+    function stopRecording() {
+      processor?.disconnect();
+      source?.disconnect();
+      stream?.getTracks().forEach(t => t.stop());
+      audioCtx?.close();
+      speechBuf = []; silenceCount = 0; isSpeaking = false;
+      btnStart.disabled = false;
+      btnStop.disabled  = true;
+      setStatus('대기 중');
+      levelFill.style.width = '0%';
+    }
+
+    btnStart.onclick = () => startRecording().catch(e => setStatus('오류: ' + e.message));
+    btnStop.onclick  = stopRecording;
+    document.getElementById('btn-clear').onclick = () => output.innerHTML = '';
+  </script>
+</body>
+</html>
